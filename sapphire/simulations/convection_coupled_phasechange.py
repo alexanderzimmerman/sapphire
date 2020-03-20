@@ -5,12 +5,19 @@ import sapphire.continuation
 
 
 def element(cell, degree):
-
-    scalar = fe.FiniteElement("P", cell, degree)
     
-    vector = fe.VectorElement("P", cell, degree)
+    if type(degree) is type(1):
     
-    return fe.MixedElement(scalar, vector, scalar)
+        degree = (degree,)*3
+        
+    pressure_element = fe.FiniteElement("P", cell, degree[0])
+    
+    velocity_element = fe.VectorElement("P", cell, degree[1])
+    
+    temperature_element = fe.FiniteElement("P", cell, degree[2])
+    
+    return fe.MixedElement(
+        pressure_element, velocity_element, temperature_element)
     
 
 erf, sqrt = fe.erf, fe.sqrt
@@ -21,7 +28,7 @@ def liquid_volume_fraction(sim, temperature):
     
     T_L = sim.liquidus_temperature
     
-    sigma = sim.smoothing
+    sigma = sim.liquidus_smoothing_factor
     
     return 0.5*(1. + erf((T - T_L)/(sigma*sqrt(2.))))
     
@@ -100,6 +107,17 @@ def strong_residual(sim, solution, buoyancy = linear_boussinesq_buoyancy):
         
     
     return r_p, r_u, r_T
+    
+    
+def strong_residual_with_pressure_penalty(sim, solution, buoyancy = linear_boussinesq_buoyancy):
+    
+    r_p, r_u, r_T = strong_residual(sim = sim, solution = solution, buoyancy = buoyancy)
+    
+    p, _, _ = solution
+    
+    gamma = sim.pressure_penalty_factor
+    
+    return r_p + gamma*p, r_u, r_T 
     
     
 def time_discrete_terms(sim):
@@ -191,7 +209,7 @@ def energy(sim, solution):
         + 1./Pr*dot(grad(psi_T), k*grad(T))
         
     
-def stabilization(sim, solution):
+def pressure_penalty(sim, solution):
 
     p, _, _ = fe.split(solution)
     
@@ -202,63 +220,72 @@ def stabilization(sim, solution):
     return gamma*psi_p*p
     
     
-def variational_form_residual(sim, solution):
+def weak_form_residual(sim, solution):
     
     return sum(
             [r(sim = sim, solution = solution) 
-            for r in (mass, momentum, energy, stabilization)])\
+            for r in (mass, momentum, energy, pressure_penalty)])\
         *fe.dx(degree = sim.quadrature_degree)
 
     
-def plotvars(sim, solution = None):
-    
-    if solution is None:
-    
-        solution = sim.solution
-        
-    V = fe.FunctionSpace(
-        solution.function_space().mesh(),
-        fe.FiniteElement("P", sim.mesh.ufl_cell(), 1))
-    
-    p, u, T = solution.split()
-    
-    phil = fe.interpolate(liquid_volume_fraction(
-        sim = sim, temperature = T), V)
-    
-    return (p, u, T, phil), \
-        ("p", "\\mathbf{u}", "T", "\\phi_l"), \
-        ("p", "u", "T", "phil")
-    
-    
 class Simulation(sapphire.simulation.Simulation):
     
-    def __init__(self, *args, mesh, element_degree = 1, **kwargs):
+    def __init__(
+            self, 
+            *args, 
+            mesh, 
+            element_degree = (1, 2, 2), 
+            grashof_number = 1.,
+            prandtl_number = 1.,
+            stefan_number = 1.,
+            pressure_penalty_factor = 1.e-7,
+            liquidus_temperature = 0.,
+            density_solid_to_liquid_ratio = 1.,
+            heat_capacity_solid_to_liquid_ratio = 1.,
+            thermal_conductivity_solid_to_liquid_ratio = 1.,
+            solid_velocity_relaxation_factor = 1.e-12,
+            liquidus_smoothing_factor = 0.01,
+            solver_parameters = {
+                "snes_type": "newtonls",
+                "snes_max_it": 24,
+                "snes_monitor": None,
+                "snes_rtol": 0.,
+                "ksp_type": "preonly", 
+                "pc_type": "lu", 
+                "mat_type": "aij",
+                "pc_factor_mat_solver_type": "mumps"},
+            **kwargs):
         
-        self.grashof_number = fe.Constant(1.)
+        self.grashof_number = fe.Constant(grashof_number)
         
-        self.prandtl_number = fe.Constant(1.)
+        self.prandtl_number = fe.Constant(prandtl_number)
         
-        self.stefan_number = fe.Constant(1.)
+        self.stefan_number = fe.Constant(stefan_number)
         
-        self.pressure_penalty_factor = fe.Constant(1.e-7)
+        self.pressure_penalty_factor = fe.Constant(pressure_penalty_factor)
         
-        self.liquidus_temperature = fe.Constant(0.)
+        self.liquidus_temperature = fe.Constant(liquidus_temperature)
         
-        self.density_solid_to_liquid_ratio = fe.Constant(1.)
+        self.density_solid_to_liquid_ratio = fe.Constant(
+            density_solid_to_liquid_ratio)
         
-        self.heat_capacity_solid_to_liquid_ratio = fe.Constant(1.)
+        self.heat_capacity_solid_to_liquid_ratio = fe.Constant(
+            heat_capacity_solid_to_liquid_ratio)
         
-        self.thermal_conductivity_solid_to_liquid_ratio = fe.Constant(1.)
+        self.thermal_conductivity_solid_to_liquid_ratio = fe.Constant(
+            thermal_conductivity_solid_to_liquid_ratio)
         
-        self.solid_velocity_relaxation_factor = fe.Constant(1.e-12)
+        self.solid_velocity_relaxation_factor = fe.Constant(
+            solid_velocity_relaxation_factor)
         
-        self.smoothing = fe.Constant(1./256.)
+        self.liquidus_smoothing_factor = fe.Constant(
+            liquidus_smoothing_factor)
         
         self.smoothing_sequence = None
         
-        if "variational_form_residual" not in kwargs:
+        if "weak_form_residual" not in kwargs:
         
-            kwargs["variational_form_residual"] = variational_form_residual
+            kwargs["weak_form_residual"] = weak_form_residual
         
         if "time_stencil_size" not in kwargs:
         
@@ -268,32 +295,19 @@ class Simulation(sapphire.simulation.Simulation):
             mesh = mesh,
             element = element(
                 cell = mesh.ufl_cell(), degree = element_degree),
-            **kwargs)
-            
-    def solve(self, *args, **kwargs):
-    
-        return super().solve(*args,
-            parameters = {
-                "snes_type": "newtonls",
-                "snes_max_it": 24,
-                "snes_monitor": None,
-                "snes_rtol": 0.,
-                "ksp_type": "preonly", 
-                "pc_type": "lu", 
-                "mat_type": "aij",
-                "pc_factor_mat_solver_type": "mumps"},
+            solver_parameters = solver_parameters,
             **kwargs)
             
     def solve_with_auto_smoothing(self):
         
-        s0 = self.smoothing.__float__()
+        s0 = self.liquidus_smoothing_factor.__float__()
         
         def solve_with_over_regularization(self, startval):
         
             return sapphire.continuation.solve_with_over_regularization(
                 solve = self.solve,
                 solution = self.solution,
-                regularization_parameter = self.smoothing,
+                regularization_parameter = self.liquidus_smoothing_factor,
                 startval = startval)
         
         def solve_with_bounded_regularization_sequence(self):
@@ -303,7 +317,7 @@ class Simulation(sapphire.simulation.Simulation):
                     solve = self.solve,
                     solution = self.solution,
                     backup_solution = self.backup_solution,
-                    regularization_parameter = self.smoothing,
+                    regularization_parameter = self.liquidus_smoothing_factor,
                     initial_regularization_sequence = self.smoothing_sequence)
                     
         if self.smoothing_sequence is None:
@@ -311,7 +325,7 @@ class Simulation(sapphire.simulation.Simulation):
             self.solution, smax = solve_with_over_regularization(
                 self, startval = None)
             
-            s = self.smoothing.__float__()
+            s = self.liquidus_smoothing_factor.__float__()
             
             if s == smax:
             
@@ -331,14 +345,28 @@ class Simulation(sapphire.simulation.Simulation):
             self.solution, smax = solve_with_over_regularization(
                 self, startval = self.smoothing_sequence[-1])
             
-            self.smoothing_sequence = (smax, self.smoothing.__float__())
+            self.smoothing_sequence = (
+                smax, self.liquidus_smoothing_factor.__float__())
             
             self.solution, self.smoothing_sequence = \
                 solve_with_bounded_regularization_sequence(self)
                
-        assert(self.smoothing.__float__() == s0)
+        assert(self.liquidus_smoothing_factor.__float__() == s0)
         
         return self.solution
+    
+    def kwargs_for_writeplots(self):
+        
+        p, u, T = self.solution.split()
+        
+        phil = fe.interpolate(liquid_volume_fraction(
+            sim = self, temperature = T), T.function_space())
+        
+        return {
+            "fields": (p, u, T, phil),
+            "labels": ("p", "\\mathbf{u}", "T", "\\phi_l"),
+            "names": ("p", "u", "T", "phil"),
+            "plotfuns": (fe.tripcolor, fe.quiver, fe.tripcolor, fe.tripcolor)}
     
     def run(self, *args, **kwargs):
         
@@ -348,15 +376,19 @@ class Simulation(sapphire.simulation.Simulation):
            
     def postprocess(self):
         
-        _, _, T = self.solution.split()
+        p, u, T = self.solution.split()
+        
+        dx = fe.dx(degree = self.quadrature_degree)
+        
+        div = fe.div
+        
+        self.mean_pressure = fe.assemble(p*dx)
+        
+        self.velocity_divergence = fe.assemble(div(u)*dx)
         
         phil = liquid_volume_fraction(sim = self, temperature = T)
         
-        self.liquid_area = fe.assemble(phil*fe.dx)
+        self.liquid_area = fe.assemble(phil*dx)
         
         return self
-        
-    def write_outputs(self, *args, **kwargs):
-        
-        super().write_outputs(*args, plotvars = plotvars, **kwargs)
         

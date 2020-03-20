@@ -5,7 +5,7 @@ import sapphire.simulation
 
 dot, grad, div = fe.dot, fe.grad, fe.div
     
-def variational_form_residual(sim, solution):
+def weak_form_residual(sim, solution):
     
     u = solution
     
@@ -41,10 +41,13 @@ def element(cell, degree):
 class Simulation(sapphire.simulation.Simulation):
     
     def __init__(self, *args,
-            mesh, advection_velocity, element_degree = 1,
+            mesh,
+            advection_velocity,
+            diffusion_coefficient = 1.,
+            element_degree = 1,
             **kwargs):
         
-        self.diffusion_coefficient = fe.Constant(1.)
+        self.diffusion_coefficient = fe.Constant(diffusion_coefficient)
         
         self.advection_velocity = advection_velocity(mesh)
     
@@ -52,6 +55,7 @@ class Simulation(sapphire.simulation.Simulation):
             mesh = mesh,
             element = element(
                 cell = mesh.ufl_cell(), degree = element_degree),
-            variational_form_residual = variational_form_residual,
+            weak_form_residual = weak_form_residual,
+            time_stencil_size = 1,
             **kwargs)
         
