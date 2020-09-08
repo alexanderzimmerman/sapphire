@@ -1,60 +1,60 @@
-""" Unsteady incompressible Navier-Stokes simulation """
+"""Provides a simulation class governed by Navier-Stokes. 
+
+This can be used to simulate incompressible flow,
+e.g. the lid-driven cavity.
+
+Dirichlet BC's should not be placed on the pressure.
+The returned pressure solution will always have zero mean.
+
+Non-homogeneous Neumann BC's are not implemented.
+"""
 import firedrake as fe
-import sapphire.simulation
+import sapphire.simulations.navier_stokes
 
 
-diff, inner, dot, grad, div, sym = \
-    fe.diff, fe.inner, fe.dot, fe.grad, fe.div, fe.sym
+inner, dot, grad, div, sym = \
+    fe.inner, fe.dot, fe.grad, fe.div, fe.sym
     
-def weak_form_residual(sim, solution):
+class Simulation(sapphire.simulations.navier_stokes.Simulation):
     
-    u, p = fe.split(sim.solution)
+    def __init__(self, *args, **kwargs):
+        
+        if "time_stencil_size" not in kwargs:
+        
+            kwargs["time_stencil_size"] = 2
+            
+        super().__init__(*args, **kwargs)
     
-    u_t, _ = sapphire.simulation.time_discrete_terms(
-        solutions = sim.solutions, timestep_size = sim.timestep_size)
-    
-    psi_u, psi_p = fe.TestFunctions(sim.solution.function_space())
-    
-    mass = psi_p*div(u)
-    
-    momentum = dot(psi_u, u_t + grad(u)*u) - div(psi_u)*p + \
-        2.*inner(sym(grad(psi_u)), sym(grad(u)))
-    
-    dx = fe.dx(degree = sim.quadrature_degree)
-    
-    return (mass + momentum)*dx
-    
-    
+    def momentum(self):
+        
+        u_t = self.time_discrete_terms()
+        
+        psi_u, _ = fe.TestFunctions(self.solution_space)
+        
+        dx = fe.dx(degree = self.quadrature_degree)
+        
+        return super().momentum() + dot(psi_u, u_t)*dx
+        
+    def time_discrete_terms(self):
+        
+        u_t, _ = sapphire.Simulation.time_discrete_terms(self)
+        
+        return u_t
+
+
+diff = fe.diff
+
 def strong_residual(sim, solution):
     
     u, p = solution
     
     t = sim.time
     
-    r_u = diff(u, t) + grad(u)*u + grad(p) - 2.*div(sym(grad(u)))
+    Re = sim.reynolds_number
+    
+    r_u = diff(u, t) + grad(u)*u + grad(p) - 2./Re*div(sym(grad(u)))
     
     r_p = div(u)
     
     return r_u, r_p
     
-    
-def element(cell, degree):
-
-    vector = fe.VectorElement("P", cell, degree + 1)
-    
-    scalar = fe.FiniteElement("P", cell, degree)
-    
-    return fe.MixedElement(vector, scalar)
-    
-    
-class Simulation(sapphire.simulation.Simulation):
-    
-    def __init__(self, *args, mesh, element_degree, **kwargs):
-        
-        super().__init__(*args,
-            mesh = mesh,
-            element = element(
-                cell = mesh.ufl_cell(), degree = element_degree),
-            weak_form_residual = weak_form_residual,
-            **kwargs)
-            
